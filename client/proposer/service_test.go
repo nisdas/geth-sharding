@@ -2,12 +2,6 @@ package proposer
 
 import (
 	"crypto/rand"
-	"github.com/fortytw2/leaktest"
-	"github.com/prysmaticlabs/prysm/client/database"
-	"github.com/prysmaticlabs/prysm/client/mainchain"
-	"github.com/prysmaticlabs/prysm/client/p2p"
-	"github.com/prysmaticlabs/prysm/client/syncer"
-	"github.com/prysmaticlabs/prysm/client/txpool"
 	"math"
 	"math/big"
 	"testing"
@@ -15,8 +9,14 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	gethTypes "github.com/ethereum/go-ethereum/core/types"
+	"github.com/fortytw2/leaktest"
+	"github.com/prysmaticlabs/prysm/client/database"
 	"github.com/prysmaticlabs/prysm/client/internal"
+	"github.com/prysmaticlabs/prysm/client/mainchain"
+	"github.com/prysmaticlabs/prysm/client/p2p"
 	"github.com/prysmaticlabs/prysm/client/params"
+	"github.com/prysmaticlabs/prysm/client/syncer"
+	"github.com/prysmaticlabs/prysm/client/txpool"
 	pb "github.com/prysmaticlabs/prysm/proto/sharding/v1"
 	logTest "github.com/sirupsen/logrus/hooks/test"
 )
