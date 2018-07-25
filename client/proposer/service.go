@@ -85,8 +85,8 @@ func (p *Proposer) Stop() error {
 // proposeCollations listens to the transaction feed and submits collations over an interval.
 func (p *Proposer) proposeCollations() {
 	feed := p.p2p.Feed(pb.Transaction{})
-	ch := make(chan p2p.Message, 20)
-	sub := feed.Subscribe(ch)
+	//ch := make(chan p2p.Message, 20)
+	sub := feed.Subscribe(p.msgChan)
 	collation := []*gethTypes.Transaction{}
 	sizeOfCollation := int64(0)
 	period, err := p.currentPeriod(p.ctx)
@@ -95,10 +95,10 @@ func (p *Proposer) proposeCollations() {
 	}
 
 	defer sub.Unsubscribe()
-	defer close(ch)
+	//defer close(ch)
 	for {
 		select {
-		case msg := <-ch:
+		case msg := <-p.msgChan:
 			tx, ok := msg.Data.(*pb.Transaction)
 			if !ok {
 				log.Error("Received incorrect p2p message. Wanted a transaction broadcast message")
