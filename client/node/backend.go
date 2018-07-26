@@ -17,7 +17,6 @@ import (
 	"github.com/prysmaticlabs/prysm/client/mainchain"
 	"github.com/prysmaticlabs/prysm/client/notary"
 	"github.com/prysmaticlabs/prysm/client/observer"
-	"github.com/prysmaticlabs/prysm/client/p2p"
 	"github.com/prysmaticlabs/prysm/client/params"
 	"github.com/prysmaticlabs/prysm/client/proposer"
 	"github.com/prysmaticlabs/prysm/client/simulator"
@@ -27,6 +26,7 @@ import (
 	"github.com/prysmaticlabs/prysm/shared"
 	"github.com/prysmaticlabs/prysm/shared/cmd"
 	"github.com/prysmaticlabs/prysm/shared/debug"
+	"github.com/prysmaticlabs/prysm/shared/p2p"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
@@ -164,7 +164,9 @@ func (s *ShardEthereum) registerMainchainClient(ctx *cli.Context) error {
 	if endpoint == "" {
 		endpoint = fmt.Sprintf("%s/%s.ipc", path, mainchain.ClientIdentifier)
 	}
-	if ctx.GlobalIsSet(cmd.IPCPathFlag.Name) {
+	if ctx.GlobalIsSet(cmd.RPCProviderFlag.Name) {
+		endpoint = ctx.GlobalString(cmd.RPCProviderFlag.Name)
+	} else if ctx.GlobalIsSet(cmd.IPCPathFlag.Name) {
 		endpoint = ctx.GlobalString(cmd.IPCPathFlag.Name)
 	}
 	passwordFile := ctx.GlobalString(cmd.PasswordFileFlag.Name)

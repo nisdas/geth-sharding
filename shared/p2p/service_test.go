@@ -4,12 +4,13 @@ import (
 	"context"
 	"io/ioutil"
 	"reflect"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/golang/protobuf/proto"
-	"github.com/prysmaticlabs/prysm/client/types"
+	"github.com/prysmaticlabs/prysm/shared"
 
 	floodsub "github.com/libp2p/go-floodsub"
 	swarmt "github.com/libp2p/go-libp2p-swarm/testing"
@@ -20,7 +21,7 @@ import (
 )
 
 // Ensure that server implements service.
-var _ = types.Service(&Server{})
+var _ = shared.Service(&Server{})
 
 func init() {
 	logrus.SetLevel(logrus.DebugLevel)
@@ -82,6 +83,7 @@ func TestSubscribeToTopic(t *testing.T) {
 		gsub:  gsub,
 		host:  h,
 		feeds: make(map[reflect.Type]*event.Feed),
+		mutex: &sync.Mutex{},
 	}
 
 	feed := s.Feed(pb.CollationBodyRequest{})
