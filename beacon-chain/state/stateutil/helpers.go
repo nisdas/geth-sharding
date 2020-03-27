@@ -4,10 +4,9 @@ import (
 	"bytes"
 	"encoding/binary"
 
-	"github.com/protolambda/zssz/htr"
-
 	"github.com/minio/sha256-simd"
 	"github.com/pkg/errors"
+	"github.com/protolambda/zssz/htr"
 	"github.com/protolambda/zssz/merkle"
 	"github.com/prysmaticlabs/go-bitfield"
 	"github.com/prysmaticlabs/prysm/shared/hashutil"
