@@ -1449,8 +1449,8 @@ go_repository(
 
 go_repository(
     name = "com_github_protolambda_zssz",
-    commit = "632f11e5e281660402bd0ac58f76090f3503def0",
-    importpath = "github.com/protolambda/zssz",
+    commit = "0e05c4d9a01d6057025907a9405018da1b1d7396",
+    importpath = "github.com/nisdas/zssz",
 )
 
 go_repository(
