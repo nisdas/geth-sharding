@@ -25,6 +25,7 @@ import (
 // Blocks that have already been seen are ignored. If the BLS signature is any valid signature,
 // this method rebroadcasts the message.
 func (s *Service) validateBeaconBlockPubSub(ctx context.Context, pid peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+	currTime := time.Now()
 	// Validation runs on publish (not just subscriptions), so we should approve any message from
 	// ourselves.
 	if pid == s.p2p.PeerID() {
@@ -136,6 +137,7 @@ func (s *Service) validateBeaconBlockPubSub(ctx context.Context, pid peer.ID, ms
 		log.WithError(err).WithField("blockSlot", blk.Block.Slot).Warn("Rejected block")
 		return pubsub.ValidationReject
 	}
+	log.Infof("Block Validation Period: %d", time.Now().Sub(currTime).Milliseconds())
 	// Record attribute of valid block.
 	span.AddAttributes(trace.Int64Attribute("slotInEpoch", int64(blk.Block.Slot%params.BeaconConfig().SlotsPerEpoch)))
 	msg.ValidatorData = blk // Used in downstream subscriber

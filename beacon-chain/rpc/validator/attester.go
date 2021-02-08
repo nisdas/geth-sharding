@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/prysmaticlabs/prysm/beacon-chain/core/blocks"
+
 	ptypes "github.com/gogo/protobuf/types"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
 	"github.com/prysmaticlabs/prysm/beacon-chain/cache"
@@ -169,6 +171,18 @@ func (vs *Server) ProposeAttestation(ctx context.Context, att *ethpb.Attestation
 	// Broadcast the new attestation to the network.
 	if err := vs.P2P.BroadcastAttestation(ctx, subnet, att); err != nil {
 		return nil, status.Errorf(codes.Internal, "Could not broadcast attestation: %v", err)
+	}
+	hState, err := vs.HeadFetcher.HeadState(context.Background())
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not fetch head state: %v", err)
+	}
+	hState, err = state.ProcessSlots(context.Background(), hState, hState.Slot()+1)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not process slots: %v", err)
+	}
+	_, err = blocks.ProcessAttestationNoVerifySignature(context.Background(), hState, att)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not verify attestation: %v", err)
 	}
 
 	go func() {

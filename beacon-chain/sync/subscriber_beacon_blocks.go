@@ -3,6 +3,7 @@ package sync
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/gogo/protobuf/proto"
 	ethpb "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
@@ -11,6 +12,7 @@ import (
 )
 
 func (s *Service) beaconBlockSubscriber(ctx context.Context, msg proto.Message) error {
+	currTime := time.Now()
 	signed, ok := msg.(*ethpb.SignedBeaconBlock)
 	if !ok {
 		return errors.New("message is not type *ethpb.SignedBeaconBlock")
@@ -34,6 +36,7 @@ func (s *Service) beaconBlockSubscriber(ctx context.Context, msg proto.Message) 
 		s.setBadBlock(ctx, root)
 		return err
 	}
+	log.Infof("time to process block: %d", time.Now().Sub(currTime).Milliseconds())
 
 	// Delete attestations from the block in the pool to avoid inclusion in future block.
 	if err := s.deleteAttsInPool(block.Body.Attestations); err != nil {

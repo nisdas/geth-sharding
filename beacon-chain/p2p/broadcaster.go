@@ -100,6 +100,7 @@ func (s *Service) broadcastAttestation(ctx context.Context, subnet uint64, att *
 			traceutil.AnnotateError(span, err)
 		}
 	}
+	log.Infof("Broadcasting attestation to subnet %d with %d of peers", subnet, len(s.pubsub.ListPeers(attestationToTopic(subnet, forkDigest)+s.Encoding().ProtocolSuffix())))
 
 	if err := s.broadcastObject(ctx, att, attestationToTopic(subnet, forkDigest)); err != nil {
 		log.WithError(err).Error("Failed to broadcast attestation")
