@@ -4,6 +4,7 @@ package helpers
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"sort"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/prysmaticlabs/prysm/shared/hashutil"
 	"github.com/prysmaticlabs/prysm/shared/params"
 	"github.com/prysmaticlabs/prysm/shared/sliceutil"
+	"go.opencensus.io/trace"
 )
 
 var committeeCache = cache.NewCommitteesCache()
@@ -90,6 +92,22 @@ func BeaconCommitteeFromState(state *stateTrie.BeaconState, slot, committeeIndex
 	return BeaconCommittee(activeIndices, seed, slot, committeeIndex)
 }
 
+func BeaconCommitteeFromState2(ctx context.Context, state *stateTrie.BeaconState, slot, committeeIndex uint64) ([]uint64, error) {
+	ctx, span := trace.StartSpan(ctx, "core.helpers.BeaconCommitteeFromState")
+	defer span.End()
+	epoch := SlotToEpoch(slot)
+	seed, err := Seed(state, epoch, params.BeaconConfig().DomainBeaconAttester)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not get seed")
+	}
+	activeIndices, err := ActiveValidatorIndices2(state, epoch)
+	if err != nil {
+		return nil, errors.Wrap(err, "could not get active indices")
+	}
+
+	return BeaconCommittee2(activeIndices, seed, slot, committeeIndex)
+}
+
 // BeaconCommittee returns the crosslink committee of a given slot and committee index. The
 // validator indices and seed are provided as an argument rather than a imported implementation
 // from the spec definition. Having them as an argument allows for cheaper computation run time.
@@ -102,6 +120,15 @@ func BeaconCommittee(validatorIndices []uint64, seed [32]byte, slot, committeeIn
 		return indices, nil
 	}
 
+	committeesPerSlot := SlotCommitteeCount(uint64(len(validatorIndices)))
+
+	epochOffset := committeeIndex + (slot%params.BeaconConfig().SlotsPerEpoch)*committeesPerSlot
+	count := committeesPerSlot * params.BeaconConfig().SlotsPerEpoch
+
+	return ComputeCommittee(validatorIndices, seed, epochOffset, count)
+}
+
+func BeaconCommittee2(validatorIndices []uint64, seed [32]byte, slot, committeeIndex uint64) ([]uint64, error) {
 	committeesPerSlot := SlotCommitteeCount(uint64(len(validatorIndices)))
 
 	epochOffset := committeeIndex + (slot%params.BeaconConfig().SlotsPerEpoch)*committeesPerSlot
@@ -217,7 +244,7 @@ func CommitteeAssignments(
 		// Compute committees.
 		for j := uint64(0); j < numCommitteesPerSlot; j++ {
 			slot := startSlot + i
-			committee, err := BeaconCommitteeFromState(state, slot, j /*committee index*/)
+			committee, err := BeaconCommitteeFromState(state, slot, j)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -251,6 +278,22 @@ func VerifyBitfieldLength(bf bitfield.Bitfield, committeeSize uint64) error {
 // a valid length matching the size of the committee.
 func VerifyAttestationBitfieldLengths(state *stateTrie.BeaconState, att *ethpb.Attestation) error {
 	committee, err := BeaconCommitteeFromState(state, att.Data.Slot, att.Data.CommitteeIndex)
+	if err != nil {
+		return errors.Wrap(err, "could not retrieve beacon committees")
+	}
+
+	if committee == nil {
+		return errors.New("no committee exist for this attestation")
+	}
+
+	if err := VerifyBitfieldLength(att.AggregationBits, uint64(len(committee))); err != nil {
+		return errors.Wrap(err, "failed to verify aggregation bitfield")
+	}
+	return nil
+}
+
+func VerifyAttestationBitfieldLengths2(state *stateTrie.BeaconState, att *ethpb.Attestation) error {
+	committee, err := BeaconCommitteeFromState2(context.TODO(), state, att.Data.Slot, att.Data.CommitteeIndex)
 	if err != nil {
 		return errors.Wrap(err, "could not retrieve beacon committees")
 	}

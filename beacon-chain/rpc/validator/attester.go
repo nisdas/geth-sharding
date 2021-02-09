@@ -176,12 +176,15 @@ func (vs *Server) ProposeAttestation(ctx context.Context, att *ethpb.Attestation
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Could not fetch head state: %v", err)
 	}
-	hState, err = state.ProcessSlots(context.Background(), hState, hState.Slot()+1)
+	hState, err = state.ProcessSlots(context.Background(), hState, att.Data.Slot+1)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "Could not process slots: %v", err)
 	}
-	_, err = blocks.ProcessAttestationNoVerifySignature(context.Background(), hState, att)
+	_, err = blocks.ProcessAttestationNoVerifySignature2(context.Background(), hState, att)
 	if err != nil {
+		return nil, status.Errorf(codes.Internal, "Could not validate attestation: %v", err)
+	}
+	if err := blocks.VerifyAttestationSignature(context.Background(), hState, att); err != nil {
 		return nil, status.Errorf(codes.Internal, "Could not verify attestation: %v", err)
 	}
 

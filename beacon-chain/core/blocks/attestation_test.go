@@ -666,7 +666,7 @@ func TestVerifyAttestations_VerifiesMultipleAttestations(t *testing.T) {
 	require.NoError(t, st.SetSlot(5))
 	require.NoError(t, st.SetValidators(validators))
 
-	comm1, err := helpers.BeaconCommitteeFromState(st, 1 /*slot*/, 0 /*committeeIndex*/)
+	comm1, err := helpers.BeaconCommitteeFromState(st, 1, 0)
 	require.NoError(t, err)
 	att1 := testutil.HydrateAttestation(&ethpb.Attestation{
 		AggregationBits: bitfield.NewBitlist(uint64(len(comm1))),
@@ -685,7 +685,7 @@ func TestVerifyAttestations_VerifiesMultipleAttestations(t *testing.T) {
 	}
 	att1.Signature = bls.AggregateSignatures(sigs).Marshal()
 
-	comm2, err := helpers.BeaconCommitteeFromState(st, 1 /*slot*/, 1 /*committeeIndex*/)
+	comm2, err := helpers.BeaconCommitteeFromState(st, 1, 1)
 	require.NoError(t, err)
 	att2 := testutil.HydrateAttestation(&ethpb.Attestation{
 		AggregationBits: bitfield.NewBitlist(uint64(len(comm2))),
@@ -732,7 +732,7 @@ func TestVerifyAttestations_HandlesPlannedFork(t *testing.T) {
 		PreviousVersion: params.BeaconConfig().GenesisForkVersion,
 	}))
 
-	comm1, err := helpers.BeaconCommitteeFromState(st, 1 /*slot*/, 0 /*committeeIndex*/)
+	comm1, err := helpers.BeaconCommitteeFromState(st, 1, 0)
 	require.NoError(t, err)
 	att1 := testutil.HydrateAttestation(&ethpb.Attestation{
 		AggregationBits: bitfield.NewBitlist(uint64(len(comm1))),
@@ -751,7 +751,7 @@ func TestVerifyAttestations_HandlesPlannedFork(t *testing.T) {
 	}
 	att1.Signature = bls.AggregateSignatures(sigs).Marshal()
 
-	comm2, err := helpers.BeaconCommitteeFromState(st, 1*params.BeaconConfig().SlotsPerEpoch+1 /*slot*/, 1 /*committeeIndex*/)
+	comm2, err := helpers.BeaconCommitteeFromState(st, 1*params.BeaconConfig().SlotsPerEpoch+1, 1)
 	require.NoError(t, err)
 	att2 := testutil.HydrateAttestation(&ethpb.Attestation{
 		AggregationBits: bitfield.NewBitlist(uint64(len(comm2))),
@@ -794,7 +794,7 @@ func TestRetrieveAttestationSignatureSet_VerifiesMultipleAttestations(t *testing
 	require.NoError(t, st.SetSlot(5))
 	require.NoError(t, st.SetValidators(validators))
 
-	comm1, err := helpers.BeaconCommitteeFromState(st, 1 /*slot*/, 0 /*committeeIndex*/)
+	comm1, err := helpers.BeaconCommitteeFromState(st, 1, 0)
 	require.NoError(t, err)
 	att1 := testutil.HydrateAttestation(&ethpb.Attestation{
 		AggregationBits: bitfield.NewBitlist(uint64(len(comm1))),
@@ -813,7 +813,7 @@ func TestRetrieveAttestationSignatureSet_VerifiesMultipleAttestations(t *testing
 	}
 	att1.Signature = bls.AggregateSignatures(sigs).Marshal()
 
-	comm2, err := helpers.BeaconCommitteeFromState(st, 1 /*slot*/, 1 /*committeeIndex*/)
+	comm2, err := helpers.BeaconCommitteeFromState(st, 1, 1)
 	require.NoError(t, err)
 	att2 := testutil.HydrateAttestation(&ethpb.Attestation{
 		AggregationBits: bitfield.NewBitlist(uint64(len(comm2))),

@@ -85,6 +85,8 @@ func ProcessAttestationsNoVerifySignature(
 	beaconState *stateTrie.BeaconState,
 	b *ethpb.SignedBeaconBlock,
 ) (*stateTrie.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "beacon-chain.ChainService.state.ProcessAttestationsNoVerifySignature")
+	defer span.End()
 	if b.Block == nil || b.Block.Body == nil {
 		return nil, errors.New("block and block body can't be nil")
 	}
@@ -205,6 +207,126 @@ func ProcessAttestationNoVerifySignature(
 
 	// Verify attesting indices are correct.
 	committee, err := helpers.BeaconCommitteeFromState(beaconState, att.Data.Slot, att.Data.CommitteeIndex)
+	if err != nil {
+		return nil, err
+	}
+	indexedAtt, err := attestationutil.ConvertToIndexed(ctx, att, committee)
+	if err != nil {
+		return nil, err
+	}
+	if err := attestationutil.IsValidAttestationIndices(ctx, indexedAtt); err != nil {
+		return nil, err
+	}
+
+	return beaconState, nil
+}
+
+// ProcessAttestationNoVerifySignature processes the attestation without verifying the attestation signature. This
+// method is used to validate attestations whose signatures have already been verified.
+func ProcessAttestationNoVerifySignature2(
+	ctx context.Context,
+	beaconState *stateTrie.BeaconState,
+	att *ethpb.Attestation,
+) (*stateTrie.BeaconState, error) {
+	ctx, span := trace.StartSpan(ctx, "core.ProcessAttestationNoVerifySignature")
+	defer span.End()
+
+	if err := helpers.ValidateNilAttestation(att); err != nil {
+		return nil, err
+	}
+	currEpoch := helpers.SlotToEpoch(beaconState.Slot())
+	var prevEpoch uint64
+	if currEpoch == 0 {
+		prevEpoch = 0
+	} else {
+		prevEpoch = currEpoch - 1
+	}
+	data := att.Data
+	if data.Target.Epoch != prevEpoch && data.Target.Epoch != currEpoch {
+		return nil, fmt.Errorf(
+			"expected target epoch (%d) to be the previous epoch (%d) or the current epoch (%d)",
+			data.Target.Epoch,
+			prevEpoch,
+			currEpoch,
+		)
+	}
+	if err := helpers.ValidateSlotTargetEpoch(att.Data); err != nil {
+		return nil, err
+	}
+
+	s := att.Data.Slot
+	minInclusionCheck := s+params.BeaconConfig().MinAttestationInclusionDelay <= beaconState.Slot()
+	epochInclusionCheck := beaconState.Slot() <= s+params.BeaconConfig().SlotsPerEpoch
+	if !minInclusionCheck {
+		return nil, fmt.Errorf(
+			"attestation slot %d + inclusion delay %d > state slot %d",
+			s,
+			params.BeaconConfig().MinAttestationInclusionDelay,
+			beaconState.Slot(),
+		)
+	}
+	if !epochInclusionCheck {
+		return nil, fmt.Errorf(
+			"state slot %d > attestation slot %d + SLOTS_PER_EPOCH %d",
+			beaconState.Slot(),
+			s,
+			params.BeaconConfig().SlotsPerEpoch,
+		)
+	}
+	activeValidatorCount, err := helpers.ActiveValidatorCount2(beaconState, att.Data.Target.Epoch)
+	if err != nil {
+		return nil, err
+	}
+	c := helpers.SlotCommitteeCount(activeValidatorCount)
+	if att.Data.CommitteeIndex >= c {
+		return nil, fmt.Errorf("committee index %d >= committee count %d", att.Data.CommitteeIndex, c)
+	}
+
+	if err := helpers.VerifyAttestationBitfieldLengths2(beaconState, att); err != nil {
+		return nil, errors.Wrap(err, "could not verify attestation bitfields")
+	}
+
+	proposerIndex, err := helpers.BeaconProposerIndex2(beaconState)
+	if err != nil {
+		return nil, err
+	}
+	pendingAtt := &pb.PendingAttestation{
+		Data:            data,
+		AggregationBits: att.AggregationBits,
+		InclusionDelay:  beaconState.Slot() - s,
+		ProposerIndex:   proposerIndex,
+	}
+
+	var ffgSourceEpoch uint64
+	var ffgSourceRoot []byte
+	var ffgTargetEpoch uint64
+	if data.Target.Epoch == currEpoch {
+		ffgSourceEpoch = beaconState.CurrentJustifiedCheckpoint().Epoch
+		ffgSourceRoot = beaconState.CurrentJustifiedCheckpoint().Root
+		ffgTargetEpoch = currEpoch
+		if err := beaconState.AppendCurrentEpochAttestations(pendingAtt); err != nil {
+			return nil, err
+		}
+	} else {
+		ffgSourceEpoch = beaconState.PreviousJustifiedCheckpoint().Epoch
+		ffgSourceRoot = beaconState.PreviousJustifiedCheckpoint().Root
+		ffgTargetEpoch = prevEpoch
+		if err := beaconState.AppendPreviousEpochAttestations(pendingAtt); err != nil {
+			return nil, err
+		}
+	}
+	if data.Source.Epoch != ffgSourceEpoch {
+		return nil, fmt.Errorf("expected source epoch %d, received %d", ffgSourceEpoch, data.Source.Epoch)
+	}
+	if !bytes.Equal(data.Source.Root, ffgSourceRoot) {
+		return nil, fmt.Errorf("expected source root %#x, received %#x", ffgSourceRoot, data.Source.Root)
+	}
+	if data.Target.Epoch != ffgTargetEpoch {
+		return nil, fmt.Errorf("expected target epoch %d, received %d", ffgTargetEpoch, data.Target.Epoch)
+	}
+
+	// Verify attesting indices are correct.
+	committee, err := helpers.BeaconCommitteeFromState2(ctx, beaconState, att.Data.Slot, att.Data.CommitteeIndex)
 	if err != nil {
 		return nil, err
 	}

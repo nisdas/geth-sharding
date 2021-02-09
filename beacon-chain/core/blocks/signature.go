@@ -12,6 +12,7 @@ import (
 	"github.com/prysmaticlabs/prysm/shared/attestationutil"
 	"github.com/prysmaticlabs/prysm/shared/bls"
 	"github.com/prysmaticlabs/prysm/shared/params"
+	"go.opencensus.io/trace"
 )
 
 // retrieves the signature set from the raw data, public key,signature and domain provided.
@@ -125,6 +126,9 @@ func randaoSigningData(beaconState *stateTrie.BeaconState) ([]byte, []byte, []by
 
 // Method to break down attestations of the same domain and collect them into a single signature set.
 func createAttestationSignatureSet(ctx context.Context, beaconState *stateTrie.BeaconState, atts []*ethpb.Attestation, domain []byte) (*bls.SignatureSet, error) {
+	ctx, span := trace.StartSpan(ctx, "beacon-chain.ChainService.state.createAttestationSignatureSet")
+	defer span.End()
+
 	if len(atts) == 0 {
 		return nil, nil
 	}
@@ -173,6 +177,9 @@ func createAttestationSignatureSet(ctx context.Context, beaconState *stateTrie.B
 // AttestationSignatureSet retrieves all the related attestation signature data such as the relevant public keys,
 // signatures and attestation signing data and collate it into a signature set object.
 func AttestationSignatureSet(ctx context.Context, beaconState *stateTrie.BeaconState, atts []*ethpb.Attestation) (*bls.SignatureSet, error) {
+	ctx, span := trace.StartSpan(ctx, "beacon-chain.ChainService.state.AttestationSignatureSet")
+	defer span.End()
+
 	if len(atts) == 0 {
 		return bls.NewSet(), nil
 	}

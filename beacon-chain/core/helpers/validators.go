@@ -101,6 +101,19 @@ func ActiveValidatorIndices(state *stateTrie.BeaconState, epoch uint64) ([]uint6
 	return indices, nil
 }
 
+func ActiveValidatorIndices2(state *stateTrie.BeaconState, epoch uint64) ([]uint64, error) {
+	var indices []uint64
+	if err := state.ReadFromEveryValidator(func(idx int, val stateTrie.ReadOnlyValidator) error {
+		if IsActiveValidatorUsingTrie(val, epoch) {
+			indices = append(indices, uint64(idx))
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return indices, nil
+}
+
 // ActiveValidatorCount returns the number of active validators in the state
 // at the given epoch.
 func ActiveValidatorCount(state *stateTrie.BeaconState, epoch uint64) (uint64, error) {
@@ -130,6 +143,21 @@ func ActiveValidatorCount(state *stateTrie.BeaconState, epoch uint64) (uint64, e
 		return 0, errors.Wrap(err, "could not update committee cache")
 	}
 
+	return count, nil
+}
+
+// ActiveValidatorCount returns the number of active validators in the state
+// at the given epoch.
+func ActiveValidatorCount2(state *stateTrie.BeaconState, epoch uint64) (uint64, error) {
+	count := uint64(0)
+	if err := state.ReadFromEveryValidator(func(idx int, val stateTrie.ReadOnlyValidator) error {
+		if IsActiveValidatorUsingTrie(val, epoch) {
+			count++
+		}
+		return nil
+	}); err != nil {
+		return 0, err
+	}
 	return count, nil
 }
 
@@ -209,6 +237,24 @@ func BeaconProposerIndex(state *stateTrie.BeaconState) (uint64, error) {
 		}
 	}
 
+	seed, err := Seed(state, e, params.BeaconConfig().DomainBeaconProposer)
+	if err != nil {
+		return 0, errors.Wrap(err, "could not generate seed")
+	}
+
+	seedWithSlot := append(seed[:], bytesutil.Bytes8(state.Slot())...)
+	seedWithSlotHash := hashutil.Hash(seedWithSlot)
+
+	indices, err := ActiveValidatorIndices(state, e)
+	if err != nil {
+		return 0, errors.Wrap(err, "could not get active indices")
+	}
+
+	return ComputeProposerIndex(state, indices, seedWithSlotHash)
+}
+
+func BeaconProposerIndex2(state *stateTrie.BeaconState) (uint64, error) {
+	e := CurrentEpoch(state)
 	seed, err := Seed(state, e, params.BeaconConfig().DomainBeaconProposer)
 	if err != nil {
 		return 0, errors.Wrap(err, "could not generate seed")
