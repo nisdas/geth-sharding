@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"time"
 
+	golog "github.com/ipfs/go-log/v2"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/pkg/errors"
 	eth "github.com/prysmaticlabs/ethereumapis/eth/v1alpha1"
@@ -100,7 +102,12 @@ func (s *Service) broadcastAttestation(ctx context.Context, subnet uint64, att *
 			traceutil.AnnotateError(span, err)
 		}
 	}
-	log.Infof("Broadcasting attestation to subnet %d with %d of peers", subnet, len(s.pubsub.ListPeers(attestationToTopic(subnet, forkDigest)+s.Encoding().ProtocolSuffix())))
+	golog.SetAllLoggers(golog.LevelDebug)
+	go func() {
+		time.Sleep(4 * time.Second)
+		golog.SetAllLoggers(golog.LevelFatal)
+	}()
+	log.Infof("Broadcasting attestation to subnet %d with %v of peers", subnet, s.pubsub.ListPeers(attestationToTopic(subnet, forkDigest)+s.Encoding().ProtocolSuffix()))
 
 	if err := s.broadcastObject(ctx, att, attestationToTopic(subnet, forkDigest)); err != nil {
 		log.WithError(err).Error("Failed to broadcast attestation")
