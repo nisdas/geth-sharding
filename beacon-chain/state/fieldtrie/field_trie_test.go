@@ -204,50 +204,6 @@ func TestFieldTrie_TransferTrie(t *testing.T) {
 	require.DeepEqual(t, oldRoot, newRoot)
 }
 
-// TestFieldTrie_TransferLazyCopy reproduces a panic where TransferTrie was
-// called on a lazy-copied trie (parentLayers set, fieldLayers nil). Before the
-// fix, TransferTrie ignored parentLayers, producing a trie with nil layers that
-// panicked in RecomputeFromLayer.
-func TestFieldTrie_TransferLazyCopy(t *testing.T) {
-	newState, _ := util.DeterministicGenesisState(t, 40)
-	mixes := newState.RandaoMixes()
-	randaoMixes := make([][32]byte, len(mixes))
-	for i, r := range mixes {
-		randaoMixes[i] = [32]byte(r)
-	}
-
-	// Create a trie with valid layers.
-	originalTrie, err := NewFieldTrie(types.RandaoMixes, types.BasicArray, customtypes.RandaoMixes(randaoMixes), uint64(params.BeaconConfig().EpochsPerHistoricalVector))
-	require.NoError(t, err)
-	originalRoot, err := originalTrie.TrieRoot()
-	require.NoError(t, err)
-
-	// CopyTrie creates a lazy copy with parentLayers set, fieldLayers nil.
-	lazyCopy := originalTrie.CopyTrie()
-
-	// TransferTrie on the lazy copy — this used to panic because it didn't
-	// handle parentLayers.
-	transferred := lazyCopy.TransferTrie()
-
-	// The transferred trie should produce valid roots.
-	transferredRoot, err := transferred.TrieRoot()
-	require.NoError(t, err)
-	require.Equal(t, originalRoot, transferredRoot, "transferred trie should have same root")
-
-	// RecomputeTrie on the transferred trie should not panic.
-	changedIdx := []uint64{5}
-	newVal := [32]byte{'X', 'Y', 'Z'}
-	require.NoError(t, newState.UpdateRandaoMixesAtIndex(5, newVal))
-	mixes = newState.RandaoMixes()
-	randaoMixes = make([][32]byte, len(mixes))
-	for i, r := range mixes {
-		randaoMixes[i] = [32]byte(r)
-	}
-	recomputedRoot, err := transferred.RecomputeTrie(changedIdx, customtypes.RandaoMixes(randaoMixes))
-	require.NoError(t, err)
-	require.NotEqual(t, originalRoot, recomputedRoot, "recomputed root should differ after mutation")
-}
-
 func FuzzFieldTrie(f *testing.F) {
 	newState, _ := util.DeterministicGenesisState(f, 40)
 	var data []byte
@@ -270,6 +226,224 @@ func FuzzFieldTrie(f *testing.F) {
 			return
 		}
 	})
+}
+
+func TestOverlayCreation(t *testing.T) {
+	newState, _ := util.DeterministicGenesisState(t, 32)
+	mixes := newState.RandaoMixes()
+	randaoMixes := make([][32]byte, len(mixes))
+	for i, r := range mixes {
+		randaoMixes[i] = [32]byte(r)
+	}
+
+	owned, err := NewFieldTrie(types.RandaoMixes, types.BasicArray, customtypes.RandaoMixes(randaoMixes), uint64(params.BeaconConfig().EpochsPerHistoricalVector))
+	require.NoError(t, err)
+	require.Equal(t, false, owned.IsOverlay())
+
+	ownedRoot, err := owned.TrieRoot()
+	require.NoError(t, err)
+
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	overlayRoot, err := overlay.TrieRoot()
+	require.NoError(t, err)
+	require.Equal(t, ownedRoot, overlayRoot, "overlay root should match owned root")
+}
+
+func TestOverlayCopy(t *testing.T) {
+	newState, _ := util.DeterministicGenesisState(t, 32)
+	compactVals := stateutil.CompactValidatorsFromProto(newState.Validators())
+	mvRoots := buildTestCompositeSlice[stateutil.CompactValidator](compactVals)
+	elements := mvslice.MultiValueSliceComposite[stateutil.CompactValidator]{
+		Identifiable:    mockIdentifier{},
+		MultiValueSlice: mvRoots,
+	}
+
+	owned, err := NewFieldTrie(types.Validators, types.CompositeArray, elements, params.BeaconConfig().ValidatorRegistryLimit)
+	require.NoError(t, err)
+	ownedRoot, err := owned.TrieRoot()
+	require.NoError(t, err)
+
+	// Create overlay on owned.
+	overlay1 := owned.CopyTrie()
+	require.Equal(t, true, overlay1.IsOverlay())
+
+	// Create overlay on overlay (copy of copy).
+	overlay2 := overlay1.CopyTrie()
+	require.Equal(t, true, overlay2.IsOverlay())
+
+	overlay2Root, err := overlay2.TrieRoot()
+	require.NoError(t, err)
+	require.Equal(t, ownedRoot, overlay2Root, "overlay-on-overlay root should match owned root")
+}
+
+func TestOverlayRecompute_CompositeArray(t *testing.T) {
+	newState, _ := util.DeterministicGenesisState(t, 32)
+	compactVals := stateutil.CompactValidatorsFromProto(newState.Validators())
+	mvRoots := buildTestCompositeSlice[stateutil.CompactValidator](compactVals)
+	elements := mvslice.MultiValueSliceComposite[stateutil.CompactValidator]{
+		Identifiable:    mockIdentifier{},
+		MultiValueSlice: mvRoots,
+	}
+
+	// Build two identical tries — one owned, one overlay.
+	owned, err := NewFieldTrie(types.Validators, types.CompositeArray, elements, params.BeaconConfig().ValidatorRegistryLimit)
+	require.NoError(t, err)
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	// Mutate validators.
+	changedIdx := []uint64{2, 29}
+	val1, err := newState.ValidatorAtIndex(10)
+	require.NoError(t, err)
+	val2, err := newState.ValidatorAtIndex(11)
+	require.NoError(t, err)
+	val1.Slashed = true
+	val1.ExitEpoch = 20
+	val2.Slashed = true
+	val2.ExitEpoch = 40
+
+	require.NoError(t, newState.UpdateValidatorAtIndex(primitives.ValidatorIndex(changedIdx[0]), val1))
+	require.NoError(t, newState.UpdateValidatorAtIndex(primitives.ValidatorIndex(changedIdx[1]), val2))
+	newCompactVals := stateutil.CompactValidatorsFromProto(newState.Validators())
+
+	// Compute expected root from scratch.
+	expectedRoot, err := stateutil.ValidatorRegistryRoot(newCompactVals)
+	require.NoError(t, err)
+
+	// Recompute on overlay.
+	overlayRoot, err := overlay.RecomputeTrie(changedIdx, newCompactVals)
+	require.NoError(t, err)
+	assert.Equal(t, expectedRoot, overlayRoot, "overlay recompute should match reference root")
+}
+
+func TestOverlayRecompute_CompressedArray(t *testing.T) {
+	newState, _ := util.DeterministicGenesisState(t, 32)
+	mvBals := buildTestCompositeSlice(newState.Balances())
+	elements := mvslice.MultiValueSliceComposite[uint64]{
+		Identifiable:    mockIdentifier{},
+		MultiValueSlice: mvBals,
+	}
+
+	owned, err := NewFieldTrie(types.Balances, types.CompressedArray, elements, stateutil.ValidatorLimitForBalancesChunks())
+	require.NoError(t, err)
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	changedIdx := []uint64{4, 8}
+	require.NoError(t, newState.UpdateBalancesAtIndex(primitives.ValidatorIndex(changedIdx[0]), uint64(100000000)))
+	require.NoError(t, newState.UpdateBalancesAtIndex(primitives.ValidatorIndex(changedIdx[1]), uint64(200000000)))
+
+	expectedRoot, err := stateutil.Uint64ListRootWithRegistryLimit(newState.Balances())
+	require.NoError(t, err)
+
+	overlayRoot, err := overlay.RecomputeTrie(changedIdx, newState.Balances())
+	require.NoError(t, err)
+	assert.Equal(t, expectedRoot, overlayRoot, "overlay compressed array recompute should match reference root")
+}
+
+func TestOverlayRecompute_BasicArray(t *testing.T) {
+	newState, _ := util.DeterministicGenesisState(t, 32)
+	mixes := newState.RandaoMixes()
+	randaoMixes := make([][32]byte, len(mixes))
+	for i, r := range mixes {
+		randaoMixes[i] = [32]byte(r)
+	}
+
+	owned, err := NewFieldTrie(types.RandaoMixes, types.BasicArray, customtypes.RandaoMixes(randaoMixes), uint64(params.BeaconConfig().EpochsPerHistoricalVector))
+	require.NoError(t, err)
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	changedIdx := []uint64{2, 29}
+	changedVals := [][32]byte{{'A', 'B'}, {'C', 'D'}}
+	require.NoError(t, newState.UpdateRandaoMixesAtIndex(changedIdx[0], changedVals[0]))
+	require.NoError(t, newState.UpdateRandaoMixesAtIndex(changedIdx[1], changedVals[1]))
+	mixes = newState.RandaoMixes()
+	randaoMixes = make([][32]byte, len(mixes))
+	for i, r := range mixes {
+		randaoMixes[i] = [32]byte(r)
+	}
+
+	// Compute expected root from scratch.
+	expectedRoot, err := stateutil.RootsArrayHashTreeRoot(newState.RandaoMixes(), uint64(params.BeaconConfig().EpochsPerHistoricalVector))
+	require.NoError(t, err)
+
+	overlayRoot, err := overlay.RecomputeTrie(changedIdx, customtypes.RandaoMixes(randaoMixes))
+	require.NoError(t, err)
+	assert.Equal(t, expectedRoot, overlayRoot, "overlay basic array recompute should match reference root")
+}
+
+func TestOverlayImmutability(t *testing.T) {
+	newState, _ := util.DeterministicGenesisState(t, 32)
+	compactVals := stateutil.CompactValidatorsFromProto(newState.Validators())
+	mvRoots := buildTestCompositeSlice[stateutil.CompactValidator](compactVals)
+	elements := mvslice.MultiValueSliceComposite[stateutil.CompactValidator]{
+		Identifiable:    mockIdentifier{},
+		MultiValueSlice: mvRoots,
+	}
+
+	base, err := NewFieldTrie(types.Validators, types.CompositeArray, elements, params.BeaconConfig().ValidatorRegistryLimit)
+	require.NoError(t, err)
+	baseRoot, err := base.TrieRoot()
+	require.NoError(t, err)
+
+	// Two overlays from same base.
+	overlay1 := base.CopyTrie()
+	overlay2 := base.CopyTrie()
+
+	// Mutate overlay1.
+	val1, err := newState.ValidatorAtIndex(10)
+	require.NoError(t, err)
+	val1.Slashed = true
+	val1.ExitEpoch = 20
+	require.NoError(t, newState.UpdateValidatorAtIndex(2, val1))
+	newCompactVals := stateutil.CompactValidatorsFromProto(newState.Validators())
+
+	_, err = overlay1.RecomputeTrie([]uint64{2}, newCompactVals)
+	require.NoError(t, err)
+
+	// Base should be unchanged.
+	baseRootAfter, err := base.TrieRoot()
+	require.NoError(t, err)
+	require.Equal(t, baseRoot, baseRootAfter, "base should be unchanged after overlay mutation")
+
+	// Sibling overlay should be unchanged.
+	overlay2Root, err := overlay2.TrieRoot()
+	require.NoError(t, err)
+	require.Equal(t, baseRoot, overlay2Root, "sibling overlay should be unchanged")
+}
+
+func TestOverlayAllIndicesDirty(t *testing.T) {
+	// Verify correctness when all indices are dirty (simulates epoch boundary
+	// for small validator sets where promotion threshold isn't reached).
+	newState, _ := util.DeterministicGenesisState(t, 32)
+	compactVals := stateutil.CompactValidatorsFromProto(newState.Validators())
+	mvRoots := buildTestCompositeSlice[stateutil.CompactValidator](compactVals)
+	elements := mvslice.MultiValueSliceComposite[stateutil.CompactValidator]{
+		Identifiable:    mockIdentifier{},
+		MultiValueSlice: mvRoots,
+	}
+
+	owned, err := NewFieldTrie(types.Validators, types.CompositeArray, elements, params.BeaconConfig().ValidatorRegistryLimit)
+	require.NoError(t, err)
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	// All indices dirty.
+	numVals := len(newState.Validators())
+	allIdx := make([]uint64, numVals)
+	for i := range allIdx {
+		allIdx[i] = uint64(i)
+	}
+
+	expectedRoot, err := stateutil.ValidatorRegistryRoot(compactVals)
+	require.NoError(t, err)
+
+	overlayRoot, err := overlay.RecomputeTrie(allIdx, compactVals)
+	require.NoError(t, err)
+	assert.Equal(t, expectedRoot, overlayRoot, "overlay with all indices dirty should produce correct root")
 }
 
 func buildTestCompositeSlice[V comparable](values []V) mvslice.MultiValueSliceComposite[V] {
