@@ -19,14 +19,16 @@ func TestReturnTrieLayer_OK(t *testing.T) {
 	root, err := stateutil.RootsArrayHashTreeRoot(newState.BlockRoots(), uint64(params.BeaconConfig().SlotsPerHistoricalRoot))
 	require.NoError(t, err)
 	roots := retrieveBlockRoots(newState)
-	layers, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
+	nodes, offsets, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
 	assert.NoError(t, err)
-	newRoot := *layers[len(layers)-1][0]
+	depth := len(offsets) - 2
+	newRoot := nodes[offsets[depth]]
 	assert.Equal(t, root, newRoot)
 
-	layers, err = stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
+	nodes, offsets, err = stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
 	assert.NoError(t, err)
-	lastRoot := *layers[len(layers)-1][0]
+	depth = len(offsets) - 2
+	lastRoot := nodes[offsets[depth]]
 	assert.Equal(t, root, lastRoot)
 }
 
@@ -37,9 +39,10 @@ func BenchmarkReturnTrieLayer_NormalAlgorithm(b *testing.B) {
 	roots := retrieveBlockRoots(newState)
 
 	for b.Loop() {
-		layers, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
+		nodes, offsets, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
 		assert.NoError(b, err)
-		newRoot := *layers[len(layers)-1][0]
+		depth := len(offsets) - 2
+		newRoot := nodes[offsets[depth]]
 		assert.Equal(b, root, newRoot)
 	}
 }
@@ -51,9 +54,10 @@ func BenchmarkReturnTrieLayer_VectorizedAlgorithm(b *testing.B) {
 	roots := retrieveBlockRoots(newState)
 
 	for b.Loop() {
-		layers, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
+		nodes, offsets, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
 		assert.NoError(b, err)
-		newRoot := *layers[len(layers)-1][0]
+		depth := len(offsets) - 2
+		newRoot := nodes[offsets[depth]]
 		assert.Equal(b, root, newRoot)
 	}
 }
@@ -69,14 +73,16 @@ func TestReturnTrieLayerVariable_OK(t *testing.T) {
 		require.NoError(t, err)
 		roots = append(roots, rt)
 	}
-	layers := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
-	newRoot := *layers[len(layers)-1][0]
+	nodes, offsets := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
+	depth := len(offsets) - 2
+	newRoot := nodes[offsets[depth]]
 	newRoot, err = stateutil.AddInMixin(newRoot, uint64(len(validators)))
 	require.NoError(t, err)
 	assert.Equal(t, root, newRoot)
 
-	layers = stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
-	lastRoot := *layers[len(layers)-1][0]
+	nodes, offsets = stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
+	depth = len(offsets) - 2
+	lastRoot := nodes[offsets[depth]]
 	lastRoot, err = stateutil.AddInMixin(lastRoot, uint64(len(validators)))
 	require.NoError(t, err)
 	assert.Equal(t, root, lastRoot)
@@ -96,8 +102,9 @@ func BenchmarkReturnTrieLayerVariable_NormalAlgorithm(b *testing.B) {
 	}
 
 	for b.Loop() {
-		layers := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
-		newRoot := *layers[len(layers)-1][0]
+		nodes, offsets := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
+		depth := len(offsets) - 2
+		newRoot := nodes[offsets[depth]]
 		newRoot, err = stateutil.AddInMixin(newRoot, uint64(len(validators)))
 		require.NoError(b, err)
 		assert.Equal(b, root, newRoot)
@@ -118,8 +125,9 @@ func BenchmarkReturnTrieLayerVariable_VectorizedAlgorithm(b *testing.B) {
 	}
 
 	for b.Loop() {
-		layers := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
-		newRoot := *layers[len(layers)-1][0]
+		nodes, offsets := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
+		depth := len(offsets) - 2
+		newRoot := nodes[offsets[depth]]
 		newRoot, err = stateutil.AddInMixin(newRoot, uint64(len(validators)))
 		require.NoError(b, err)
 		assert.Equal(b, root, newRoot)
@@ -130,7 +138,7 @@ func TestRecomputeFromLayer_FixedSizedArray(t *testing.T) {
 	newState, _ := util.DeterministicGenesisState(t, 32)
 	roots := retrieveBlockRoots(newState)
 
-	layers, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
+	nodes, offsets, err := stateutil.ReturnTrieLayer(roots, uint64(len(roots)))
 	require.NoError(t, err)
 
 	changedIdx := []uint64{24, 41}
@@ -140,7 +148,7 @@ func TestRecomputeFromLayer_FixedSizedArray(t *testing.T) {
 
 	expectedRoot, err := stateutil.RootsArrayHashTreeRoot(newState.BlockRoots(), uint64(params.BeaconConfig().SlotsPerHistoricalRoot))
 	require.NoError(t, err)
-	root, _, err := stateutil.RecomputeFromLayer(changedRoots, changedIdx, layers)
+	root, err := stateutil.RecomputeFromLayer(changedRoots, changedIdx, nodes, offsets)
 	require.NoError(t, err)
 	assert.Equal(t, expectedRoot, root)
 }
@@ -154,7 +162,7 @@ func TestRecomputeFromLayer_VariableSizedArray(t *testing.T) {
 		require.NoError(t, err)
 		roots = append(roots, rt)
 	}
-	layers := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
+	nodes, offsets := stateutil.ReturnTrieLayerVariable(roots, params.BeaconConfig().ValidatorRegistryLimit)
 
 	changedIdx := []uint64{2, 29}
 	val1, err := newState.ValidatorAtIndex(10)
@@ -179,7 +187,7 @@ func TestRecomputeFromLayer_VariableSizedArray(t *testing.T) {
 		require.NoError(t, err)
 		roots = append(roots, rt)
 	}
-	root, _, err := stateutil.RecomputeFromLayerVariable(roots, changedIdx, layers)
+	root, _, _, err := stateutil.RecomputeFromLayerVariable(roots, changedIdx, nodes, offsets)
 	require.NoError(t, err)
 	root, err = stateutil.AddInMixin(root, uint64(len(validators)))
 	require.NoError(t, err)

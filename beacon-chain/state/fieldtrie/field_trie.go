@@ -38,15 +38,16 @@ const OverlayPromotionThreshold = 10000
 // trie of the particular field.
 //
 // A FieldTrie operates in one of two modes:
-//   - Owned mode: fieldLayers != nil, base == nil. The trie owns its full
-//     layer data and mutations happen in-place.
-//   - Overlay mode: fieldLayers == nil, base != nil. The trie stores only
+//   - Owned mode: nodes != nil, base == nil. The trie owns its full
+//     layer data as a contiguous flat buffer and mutations happen in-place.
+//   - Overlay mode: nodes == nil, base != nil. The trie stores only
 //     sparse diffs (overrides) against an immutable base trie. Root computation
 //     walks the base read-only, substituting override values at modified positions.
 type FieldTrie struct {
 	*sync.RWMutex
 	reference     *stateutil.Reference
-	fieldLayers   [][]*[32]byte         // non-nil in owned mode
+	nodes         [][32]byte            // all levels packed contiguously (owned mode)
+	offsets       []int                 // offsets[i] = start of level i; offsets[depth+1] = len(nodes)
 	base          *FieldTrie            // non-nil in overlay mode; immutable, ref-counted
 	overrides     []map[uint64][32]byte // per-level sparse modifications [level][nodeIdx] → hash
 	field         types.FieldIndex
@@ -54,6 +55,16 @@ type FieldTrie struct {
 	length        uint64
 	numOfElems    int
 	isTransferred bool
+}
+
+// depth returns the trie depth from the offsets table.
+func (f *FieldTrie) depth() int {
+	return len(f.offsets) - 2
+}
+
+// levelSize returns the number of nodes at the given level.
+func (f *FieldTrie) levelSize(level int) int {
+	return f.offsets[level+1] - f.offsets[level]
 }
 
 // NewFieldTrie is the constructor for the field trie data structure. It creates the corresponding
@@ -87,28 +98,31 @@ func NewFieldTrie(field types.FieldIndex, fieldInfo types.DataType, elements any
 	}
 	switch fieldInfo {
 	case types.BasicArray:
-		fl, err := stateutil.ReturnTrieLayer(fieldRoots, length)
+		nodes, offsets, err := stateutil.ReturnTrieLayer(fieldRoots, length)
 		if err != nil {
 			return nil, err
 		}
 		return &FieldTrie{
-			fieldLayers: fl,
-			field:       field,
-			dataType:    fieldInfo,
-			reference:   stateutil.NewRef(1),
-			RWMutex:     new(sync.RWMutex),
-			length:      length,
-			numOfElems:  numOfElems,
+			nodes:      nodes,
+			offsets:    offsets,
+			field:      field,
+			dataType:   fieldInfo,
+			reference:  stateutil.NewRef(1),
+			RWMutex:    new(sync.RWMutex),
+			length:     length,
+			numOfElems: numOfElems,
 		}, nil
 	case types.CompositeArray, types.CompressedArray:
+		nodes, offsets := stateutil.ReturnTrieLayerVariable(fieldRoots, length)
 		return &FieldTrie{
-			fieldLayers: stateutil.ReturnTrieLayerVariable(fieldRoots, length),
-			field:       field,
-			dataType:    fieldInfo,
-			reference:   stateutil.NewRef(1),
-			RWMutex:     new(sync.RWMutex),
-			length:      length,
-			numOfElems:  numOfElems,
+			nodes:      nodes,
+			offsets:    offsets,
+			field:      field,
+			dataType:   fieldInfo,
+			reference:  stateutil.NewRef(1),
+			RWMutex:    new(sync.RWMutex),
+			length:     length,
+			numOfElems: numOfElems,
 		}, nil
 	default:
 		return nil, errors.Errorf("unrecognized data type in field map: %v", reflect.TypeFor[types.DataType]().Name())
@@ -147,10 +161,10 @@ func (f *FieldTrie) RecomputeTrie(indices []uint64, elements any) ([32]byte, err
 }
 
 // CopyTrie creates a lightweight overlay copy of the trie. Instead of
-// deep-copying all layer data (O(N) pointers), the copy shares the
-// immutable base and stores only sparse diffs. This is O(1) for a
-// fresh copy from an owned trie, or O(K) where K is the number of
-// existing overrides when copying from another overlay.
+// deep-copying all layer data, the copy shares the immutable base and
+// stores only sparse diffs. This is O(1) for a fresh copy from an owned
+// trie, or O(K) where K is the number of existing overrides when copying
+// from another overlay.
 func (f *FieldTrie) CopyTrie() *FieldTrie {
 	if f.Empty() {
 		return &FieldTrie{
@@ -178,8 +192,8 @@ func (f *FieldTrie) CopyTrie() *FieldTrie {
 	}
 	// Source is owned: create an overlay on this trie.
 	f.reference.AddRef()
-	depth := len(f.fieldLayers)
-	overrides := make([]map[uint64][32]byte, depth)
+	d := f.depth()
+	overrides := make([]map[uint64][32]byte, d+1)
 	return &FieldTrie{
 		base:       f,
 		overrides:  overrides,
@@ -209,7 +223,7 @@ func (f *FieldTrie) TransferTrie() *FieldTrie {
 	if f.base != nil {
 		return f.CopyTrie()
 	}
-	if f.fieldLayers == nil {
+	if f.nodes == nil {
 		return &FieldTrie{
 			field:      f.field,
 			dataType:   f.dataType,
@@ -221,16 +235,18 @@ func (f *FieldTrie) TransferTrie() *FieldTrie {
 	}
 	f.isTransferred = true
 	nTrie := &FieldTrie{
-		fieldLayers: f.fieldLayers,
-		field:       f.field,
-		dataType:    f.dataType,
-		reference:   stateutil.NewRef(1),
-		RWMutex:     new(sync.RWMutex),
-		length:      f.length,
-		numOfElems:  f.numOfElems,
+		nodes:      f.nodes,
+		offsets:    f.offsets,
+		field:      f.field,
+		dataType:   f.dataType,
+		reference:  stateutil.NewRef(1),
+		RWMutex:    new(sync.RWMutex),
+		length:     f.length,
+		numOfElems: f.numOfElems,
 	}
-	// Zero out field layers here.
-	f.fieldLayers = nil
+	// Zero out owned data.
+	f.nodes = nil
+	f.offsets = nil
 	return nTrie
 }
 
@@ -242,13 +258,13 @@ func (f *FieldTrie) TrieRoot() ([32]byte, error) {
 
 	// Overlay mode: read root from overrides, fallback to base.
 	if f.base != nil {
-		depth := len(f.base.fieldLayers) - 1
+		depth := f.base.depth()
 		trieRoot := f.readOverlayNode(depth, 0)
 		switch f.dataType {
 		case types.BasicArray:
 			return trieRoot, nil
 		case types.CompositeArray:
-			leafCount := uint64(len(f.base.fieldLayers[0]))
+			leafCount := uint64(f.base.numOfElems)
 			for idx := range f.overrides[0] {
 				if idx+1 > leafCount {
 					leafCount = idx + 1
@@ -263,17 +279,17 @@ func (f *FieldTrie) TrieRoot() ([32]byte, error) {
 	}
 
 	// Owned mode.
-	if len(f.fieldLayers[len(f.fieldLayers)-1]) == 0 {
+	depth := f.depth()
+	if f.levelSize(depth) == 0 {
 		return [32]byte{}, ErrInvalidFieldTrie
 	}
+	trieRoot := f.nodes[f.offsets[depth]]
 	switch f.dataType {
 	case types.BasicArray:
-		return *f.fieldLayers[len(f.fieldLayers)-1][0], nil
+		return trieRoot, nil
 	case types.CompositeArray:
-		trieRoot := *f.fieldLayers[len(f.fieldLayers)-1][0]
-		return stateutil.AddInMixin(trieRoot, uint64(len(f.fieldLayers[0])))
+		return stateutil.AddInMixin(trieRoot, uint64(f.numOfElems))
 	case types.CompressedArray:
-		trieRoot := *f.fieldLayers[len(f.fieldLayers)-1][0]
 		return stateutil.AddInMixin(trieRoot, uint64(f.numOfElems))
 	default:
 		return [32]byte{}, errors.Errorf("unrecognized data type in field map: %v", reflect.TypeFor[types.DataType]().Name())
@@ -289,7 +305,7 @@ func (f *FieldTrie) FieldReference() *stateutil.Reference {
 // Empty checks whether the underlying field trie is
 // empty or not.
 func (f *FieldTrie) Empty() bool {
-	return f == nil || (f.fieldLayers == nil && f.base == nil) || f.isTransferred
+	return f == nil || (f.nodes == nil && f.base == nil) || f.isTransferred
 }
 
 // IsOverlay returns true if this trie operates in overlay mode,
@@ -336,16 +352,16 @@ func copyOverrides(src []map[uint64][32]byte) []map[uint64][32]byte {
 }
 
 // readOverlayNode reads a node from the overlay at (level, idx).
-// Priority: overrides → base.fieldLayers → trie.ZeroHashes.
+// Priority: overrides → base.nodes → trie.ZeroHashes.
 func (f *FieldTrie) readOverlayNode(level int, idx uint64) [32]byte {
 	if m := f.overrides[level]; m != nil {
 		if v, ok := m[idx]; ok {
 			return v
 		}
 	}
-	bl := f.base.fieldLayers[level]
-	if int(idx) < len(bl) && bl[idx] != nil {
-		return *bl[idx]
+	levelSize := f.base.levelSize(level)
+	if int(idx) < levelSize {
+		return f.base.nodes[f.base.offsets[level]+int(idx)]
 	}
 	return trie.ZeroHashes[level]
 }
@@ -403,8 +419,7 @@ func (f *FieldTrie) recomputeOverlay(dirtyLeaves map[uint64][32]byte) [32]byte {
 func (f *FieldTrie) recomputeOverlayDispatch(indices []uint64, fieldRoots [][32]byte) ([32]byte, error) {
 	// Check promotion threshold before adding to overrides.
 	if len(indices) > OverlayPromotionThreshold || f.overlaySize() > OverlayPromotionThreshold {
-		f.promoteToOwned()
-		return f.recomputeOwned(indices, fieldRoots)
+		return f.rebuildTrie(indices, fieldRoots)
 	}
 
 	switch f.dataType {
@@ -422,8 +437,8 @@ func (f *FieldTrie) recomputeOverlayDispatch(indices []uint64, fieldRoots [][32]
 			dirtyLeaves[idx] = fieldRoots[i]
 		}
 		root := f.recomputeOverlay(dirtyLeaves)
-		// Leaf count: max of base layer 0 len and any override indices.
-		leafCount := uint64(len(f.base.fieldLayers[0]))
+		// Leaf count: max of base numOfElems and any override indices.
+		leafCount := uint64(f.base.numOfElems)
 		for idx := range f.overrides[0] {
 			if idx+1 > leafCount {
 				leafCount = idx + 1
@@ -452,6 +467,90 @@ func (f *FieldTrie) recomputeOverlayDispatch(indices []uint64, fieldRoots [][32]
 	}
 }
 
+// rebuildTrie replaces promoteToOwned + recomputeOwned for the overlay promotion path.
+// Instead of copying the entire base buffer (which recomputeOwned then overwrites),
+// it allocates a fresh buffer, fills level 0, and vectorized-hashes all upper levels.
+// For the all-dirty case (epoch boundaries), this eliminates the base copy entirely.
+func (f *FieldTrie) rebuildTrie(indices []uint64, fieldRoots [][32]byte) ([32]byte, error) {
+	depth := f.base.depth()
+
+	// Determine leaf-level indices and roots based on data type.
+	leafIndices := indices
+	leafRoots := fieldRoots
+	if f.dataType == types.CompressedArray {
+		numOfElems, err := f.field.ElemsInChunk()
+		if err != nil {
+			return [32]byte{}, err
+		}
+		// Deduplicate to chunk-level indices.
+		seen := make(map[uint64]bool, len(indices))
+		chunkIndices := make([]uint64, 0, len(indices))
+		chunkRoots := make([][32]byte, 0, len(indices))
+		for i, idx := range indices {
+			chunkIdx := idx / numOfElems
+			if seen[chunkIdx] {
+				continue
+			}
+			seen[chunkIdx] = true
+			chunkIndices = append(chunkIndices, chunkIdx)
+			chunkRoots = append(chunkRoots, fieldRoots[i])
+		}
+		leafIndices = chunkIndices
+		leafRoots = chunkRoots
+	}
+
+	// Determine the leaf count for the new buffer.
+	leafCount := f.numOfElems
+	if f.dataType == types.CompressedArray {
+		leafCount = f.base.levelSize(0)
+	}
+	for _, idx := range leafIndices {
+		if int(idx)+1 > leafCount {
+			leafCount = int(idx) + 1
+		}
+	}
+
+	// Allocate fresh buffer.
+	f.offsets = stateutil.ComputeOffsetsVariable(depth, leafCount)
+	f.nodes = make([][32]byte, f.offsets[depth+1])
+
+	// Fill level 0. Skip the base copy when all leaves are being rewritten.
+	allDirty := len(leafIndices) >= leafCount
+	if !allDirty {
+		// Partial: seed from base level 0 + accumulated overrides.
+		baseL0 := f.base.levelSize(0)
+		copy(f.nodes[:baseL0], f.base.nodes[f.base.offsets[0]:f.base.offsets[0]+baseL0])
+		for idx, val := range f.overrides[0] {
+			f.nodes[int(idx)] = val
+		}
+	}
+	// Scatter current changes into level 0.
+	for i, idx := range leafIndices {
+		f.nodes[int(idx)] = leafRoots[i]
+	}
+
+	// Vectorized-hash all upper levels from level 0.
+	stateutil.HashUpFromLeaves(f.nodes, f.offsets)
+
+	// Release the base.
+	f.base.reference.MinusRef()
+	f.base = nil
+	f.overrides = nil
+
+	// Return root with appropriate mixin.
+	trieRoot := f.nodes[f.offsets[depth]]
+	switch f.dataType {
+	case types.BasicArray:
+		return trieRoot, nil
+	case types.CompositeArray:
+		return stateutil.AddInMixin(trieRoot, uint64(f.numOfElems))
+	case types.CompressedArray:
+		return stateutil.AddInMixin(trieRoot, uint64(f.numOfElems))
+	default:
+		return [32]byte{}, errors.Errorf("unrecognized data type in field map: %v", reflect.TypeFor[types.DataType]().Name())
+	}
+}
+
 // recomputeOwned handles trie recomputation for an owned-mode trie.
 // This is the original RecomputeTrie logic, extracted for use after promotion.
 func (f *FieldTrie) recomputeOwned(indices []uint64, fieldRoots [][32]byte) ([32]byte, error) {
@@ -459,17 +558,17 @@ func (f *FieldTrie) recomputeOwned(indices []uint64, fieldRoots [][32]byte) ([32
 	var err error
 	switch f.dataType {
 	case types.BasicArray:
-		fieldRoot, f.fieldLayers, err = stateutil.RecomputeFromLayer(fieldRoots, indices, f.fieldLayers)
+		fieldRoot, err = stateutil.RecomputeFromLayer(fieldRoots, indices, f.nodes, f.offsets)
 		if err != nil {
 			return [32]byte{}, err
 		}
 		return fieldRoot, nil
 	case types.CompositeArray:
-		fieldRoot, f.fieldLayers, err = stateutil.RecomputeFromLayerVariable(fieldRoots, indices, f.fieldLayers)
+		fieldRoot, f.nodes, f.offsets, err = stateutil.RecomputeFromLayerVariable(fieldRoots, indices, f.nodes, f.offsets)
 		if err != nil {
 			return [32]byte{}, err
 		}
-		return stateutil.AddInMixin(fieldRoot, uint64(len(f.fieldLayers[0])))
+		return stateutil.AddInMixin(fieldRoot, uint64(f.numOfElems))
 	case types.CompressedArray:
 		numOfElems, err := f.field.ElemsInChunk()
 		if err != nil {
@@ -491,7 +590,7 @@ func (f *FieldTrie) recomputeOwned(indices []uint64, fieldRoots [][32]byte) ([32
 			indexExists[startIdx] = true
 			newRoots = append(newRoots, fieldRoots[i])
 		}
-		fieldRoot, f.fieldLayers, err = stateutil.RecomputeFromLayerVariable(newRoots, newIndices, f.fieldLayers)
+		fieldRoot, f.nodes, f.offsets, err = stateutil.RecomputeFromLayerVariable(newRoots, newIndices, f.nodes, f.offsets)
 		if err != nil {
 			return [32]byte{}, err
 		}
@@ -502,34 +601,46 @@ func (f *FieldTrie) recomputeOwned(indices []uint64, fieldRoots [][32]byte) ([32
 }
 
 // promoteToOwned converts an overlay trie to an owned trie by copying
-// the base's layer data and applying all overrides on top.
+// the base's flat buffer and applying all overrides on top.
 func (f *FieldTrie) promoteToOwned() {
-	baseLayers := f.base.fieldLayers
-	owned := make([][]*[32]byte, len(baseLayers))
-	for i, layer := range baseLayers {
-		owned[i] = make([]*[32]byte, len(layer))
-		copy(owned[i], layer)
-	}
-	// Apply all overrides on top of the copied layers.
-	for level, m := range f.overrides {
-		for idx, val := range m {
-			v := val
-			for int(idx) >= len(owned[level]) {
-				zerohash := trie.ZeroHashes[level]
-				owned[level] = append(owned[level], &zerohash)
+	// Determine if overrides require a larger buffer than the base.
+	baseCap := f.base.levelSize(0)
+	maxLeafIdx := baseCap - 1
+	if f.overrides[0] != nil {
+		for idx := range f.overrides[0] {
+			if int(idx) > maxLeafIdx {
+				maxLeafIdx = int(idx)
 			}
-			owned[level][idx] = &v
 		}
 	}
+
+	if maxLeafIdx+1 > baseCap {
+		// Growth needed: allocate larger buffer with base data copied.
+		f.nodes, f.offsets = stateutil.GrowFlatBuffer(f.base.nodes, f.base.offsets, maxLeafIdx+1)
+	} else {
+		// Copy base buffer directly.
+		f.nodes = make([][32]byte, len(f.base.nodes))
+		copy(f.nodes, f.base.nodes)
+		f.offsets = make([]int, len(f.base.offsets))
+		copy(f.offsets, f.base.offsets)
+	}
+
+	// Apply all overrides: direct value writes, zero allocations.
+	for level, m := range f.overrides {
+		for idx, val := range m {
+			f.nodes[f.offsets[level]+int(idx)] = val
+		}
+	}
+
 	f.base.reference.MinusRef()
-	f.fieldLayers = owned
 	f.base = nil
 	f.overrides = nil
 }
 
-// InsertFieldLayer manually inserts a field layer. This method
+// InsertFlatLayers manually inserts flat trie data. This method
 // bypasses the normal method of field computation, it is only
 // meant to be used in tests.
-func (f *FieldTrie) InsertFieldLayer(layer [][]*[32]byte) {
-	f.fieldLayers = layer
+func (f *FieldTrie) InsertFlatLayers(nodes [][32]byte, offsets []int) {
+	f.nodes = nodes
+	f.offsets = offsets
 }
