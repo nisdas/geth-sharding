@@ -1,6 +1,7 @@
 package fieldtrie
 
 import (
+	"maps"
 	"reflect"
 	"sync"
 
@@ -259,7 +260,10 @@ func (f *FieldTrie) TrieRoot() ([32]byte, error) {
 	// Overlay mode: read root from overrides, fallback to base.
 	if f.base != nil {
 		depth := f.base.depth()
-		trieRoot := f.readOverlayNode(depth, 0)
+		trieRoot, err := f.readOverlayNode(depth, 0)
+		if err != nil {
+			return [32]byte{}, err
+		}
 		switch f.dataType {
 		case types.BasicArray:
 			return trieRoot, nil
@@ -343,9 +347,7 @@ func copyOverrides(src []map[uint64][32]byte) []map[uint64][32]byte {
 	for i, m := range src {
 		if len(m) > 0 {
 			dst[i] = make(map[uint64][32]byte, len(m))
-			for k, v := range m {
-				dst[i][k] = v
-			}
+			maps.Copy(dst[i], m)
 		}
 	}
 	return dst
@@ -353,23 +355,27 @@ func copyOverrides(src []map[uint64][32]byte) []map[uint64][32]byte {
 
 // readOverlayNode reads a node from the overlay at (level, idx).
 // Priority: overrides → base.nodes → trie.ZeroHashes.
-func (f *FieldTrie) readOverlayNode(level int, idx uint64) [32]byte {
+func (f *FieldTrie) readOverlayNode(level int, idx uint64) ([32]byte, error) {
 	if m := f.overrides[level]; m != nil {
 		if v, ok := m[idx]; ok {
-			return v
+			return v, nil
 		}
 	}
-	levelSize := f.base.levelSize(level)
-	if int(idx) < levelSize {
-		return f.base.nodes[f.base.offsets[level]+int(idx)]
+	ii, err := pmath.Int(idx)
+	if err != nil {
+		return [32]byte{}, err
 	}
-	return trie.ZeroHashes[level]
+	levelSize := f.base.levelSize(level)
+	if ii < levelSize {
+		return f.base.nodes[f.base.offsets[level]+ii], nil
+	}
+	return trie.ZeroHashes[level], nil
 }
 
 // recomputeOverlay walks up the trie from dirty leaves, hashing pairs
 // and storing results in overrides. Returns the new root hash.
 // dirtyLeaves maps leaf index → leaf hash at level 0.
-func (f *FieldTrie) recomputeOverlay(dirtyLeaves map[uint64][32]byte) [32]byte {
+func (f *FieldTrie) recomputeOverlay(dirtyLeaves map[uint64][32]byte) ([32]byte, error) {
 	depth := len(f.overrides)
 	hasher := hash.CustomSHA256Hasher()
 	var combinedChunks [64]byte
@@ -378,13 +384,11 @@ func (f *FieldTrie) recomputeOverlay(dirtyLeaves map[uint64][32]byte) [32]byte {
 	if f.overrides[0] == nil {
 		f.overrides[0] = make(map[uint64][32]byte, len(dirtyLeaves))
 	}
-	for idx, h := range dirtyLeaves {
-		f.overrides[0][idx] = h
-	}
+	maps.Copy(f.overrides[0], dirtyLeaves)
 
 	// Walk up from level 0 to depth-1.
 	currentDirty := dirtyLeaves
-	for level := 0; level < depth-1; level++ {
+	for level := range depth - 1 {
 		parentDirty := make(map[uint64][32]byte, len(currentDirty)/2+1)
 		for idx := range currentDirty {
 			parentIdx := idx / 2
@@ -394,8 +398,14 @@ func (f *FieldTrie) recomputeOverlay(dirtyLeaves map[uint64][32]byte) [32]byte {
 			leftIdx := parentIdx * 2
 			rightIdx := leftIdx + 1
 
-			left := f.readOverlayNode(level, leftIdx)
-			right := f.readOverlayNode(level, rightIdx)
+			left, err := f.readOverlayNode(level, leftIdx)
+			if err != nil {
+				return [32]byte{}, err
+			}
+			right, err := f.readOverlayNode(level, rightIdx)
+			if err != nil {
+				return [32]byte{}, err
+			}
 
 			copy(combinedChunks[:32], left[:])
 			copy(combinedChunks[32:], right[:])
@@ -428,7 +438,10 @@ func (f *FieldTrie) recomputeOverlayDispatch(indices []uint64, fieldRoots [][32]
 		for i, idx := range indices {
 			dirtyLeaves[idx] = fieldRoots[i]
 		}
-		root := f.recomputeOverlay(dirtyLeaves)
+		root, err := f.recomputeOverlay(dirtyLeaves)
+		if err != nil {
+			return [32]byte{}, err
+		}
 		return root, nil
 
 	case types.CompositeArray:
@@ -436,7 +449,10 @@ func (f *FieldTrie) recomputeOverlayDispatch(indices []uint64, fieldRoots [][32]
 		for i, idx := range indices {
 			dirtyLeaves[idx] = fieldRoots[i]
 		}
-		root := f.recomputeOverlay(dirtyLeaves)
+		root, err := f.recomputeOverlay(dirtyLeaves)
+		if err != nil {
+			return [32]byte{}, err
+		}
 		// Leaf count: max of base numOfElems and any override indices.
 		leafCount := uint64(f.base.numOfElems)
 		for idx := range f.overrides[0] {
@@ -459,7 +475,10 @@ func (f *FieldTrie) recomputeOverlayDispatch(indices []uint64, fieldRoots [][32]
 				dirtyLeaves[chunkIdx] = fieldRoots[i]
 			}
 		}
-		root := f.recomputeOverlay(dirtyLeaves)
+		root, err := f.recomputeOverlay(dirtyLeaves)
+		if err != nil {
+			return [32]byte{}, err
+		}
 		return stateutil.AddInMixin(root, uint64(f.numOfElems))
 
 	default:
@@ -505,8 +524,12 @@ func (f *FieldTrie) rebuildTrie(indices []uint64, fieldRoots [][32]byte) ([32]by
 		leafCount = f.base.levelSize(0)
 	}
 	for _, idx := range leafIndices {
-		if int(idx)+1 > leafCount {
-			leafCount = int(idx) + 1
+		ii, err := pmath.Int(idx)
+		if err != nil {
+			return [32]byte{}, err
+		}
+		if ii+1 > leafCount {
+			leafCount = ii + 1
 		}
 	}
 
@@ -521,12 +544,20 @@ func (f *FieldTrie) rebuildTrie(indices []uint64, fieldRoots [][32]byte) ([32]by
 		baseL0 := f.base.levelSize(0)
 		copy(f.nodes[:baseL0], f.base.nodes[f.base.offsets[0]:f.base.offsets[0]+baseL0])
 		for idx, val := range f.overrides[0] {
-			f.nodes[int(idx)] = val
+			ii, err := pmath.Int(idx)
+			if err != nil {
+				return [32]byte{}, err
+			}
+			f.nodes[ii] = val
 		}
 	}
 	// Scatter current changes into level 0.
 	for i, idx := range leafIndices {
-		f.nodes[int(idx)] = leafRoots[i]
+		ii, err := pmath.Int(idx)
+		if err != nil {
+			return [32]byte{}, err
+		}
+		f.nodes[ii] = leafRoots[i]
 	}
 
 	// Vectorized-hash all upper levels from level 0.
@@ -602,14 +633,18 @@ func (f *FieldTrie) recomputeOwned(indices []uint64, fieldRoots [][32]byte) ([32
 
 // promoteToOwned converts an overlay trie to an owned trie by copying
 // the base's flat buffer and applying all overrides on top.
-func (f *FieldTrie) promoteToOwned() {
+func (f *FieldTrie) promoteToOwned() error {
 	// Determine if overrides require a larger buffer than the base.
 	baseCap := f.base.levelSize(0)
 	maxLeafIdx := baseCap - 1
 	if f.overrides[0] != nil {
 		for idx := range f.overrides[0] {
-			if int(idx) > maxLeafIdx {
-				maxLeafIdx = int(idx)
+			ii, err := pmath.Int(idx)
+			if err != nil {
+				return err
+			}
+			if ii > maxLeafIdx {
+				maxLeafIdx = ii
 			}
 		}
 	}
@@ -628,13 +663,18 @@ func (f *FieldTrie) promoteToOwned() {
 	// Apply all overrides: direct value writes, zero allocations.
 	for level, m := range f.overrides {
 		for idx, val := range m {
-			f.nodes[f.offsets[level]+int(idx)] = val
+			ii, err := pmath.Int(idx)
+			if err != nil {
+				return err
+			}
+			f.nodes[f.offsets[level]+ii] = val
 		}
 	}
 
 	f.base.reference.MinusRef()
 	f.base = nil
 	f.overrides = nil
+	return nil
 }
 
 // InsertFlatLayers manually inserts flat trie data. This method

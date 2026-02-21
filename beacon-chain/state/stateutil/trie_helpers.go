@@ -59,7 +59,7 @@ func ComputeOffsetsVariable(depth int, leafCount int) []int {
 // All levels are packed into a single [][32]byte buffer with offsets for each level.
 func ReturnTrieLayer(elements [][32]byte, length uint64) ([][32]byte, []int, error) {
 	N := len(elements)
-	depth := int(ssz.Depth(length))
+	depth := int(ssz.Depth(length)) // lint:ignore uintcast -- ssz.Depth returns uint8, always fits in int.
 
 	if N == 1 {
 		return [][32]byte{elements[0]}, []int{0, 1}, nil
@@ -74,7 +74,7 @@ func ReturnTrieLayer(elements [][32]byte, length uint64) ([][32]byte, []int, err
 	copy(nodes[:N], elements)
 
 	// Build upper levels using vectorized hashing.
-	for level := 0; level < depth; level++ {
+	for level := range depth {
 		levelSize := offsets[level+1] - offsets[level]
 		src := nodes[offsets[level]:offsets[level+1]]
 		if levelSize == 1 {
@@ -100,7 +100,7 @@ func HashUpFromLeaves(nodes [][32]byte, offsets []int) {
 	hasher := hash.CustomSHA256Hasher()
 	var combined [64]byte
 
-	for level := 0; level < depth; level++ {
+	for level := range depth {
 		levelSize := offsets[level+1] - offsets[level]
 		src := nodes[offsets[level]:offsets[level+1]]
 		nextStart := offsets[level+1]
@@ -127,7 +127,7 @@ func HashUpFromLeaves(nodes [][32]byte, offsets []int) {
 // Uses exact level sizes (no pow2 padding) to minimize memory. Odd-length levels
 // are handled by hashing the last element with ZeroHashes[level] separately.
 func ReturnTrieLayerVariable(elements [][32]byte, length uint64) ([][32]byte, []int) {
-	depth := int(ssz.Depth(length))
+	depth := int(ssz.Depth(length)) // lint:ignore uintcast -- ssz.Depth returns uint8, always fits in int.
 	N := len(elements)
 
 	if N == 0 {
@@ -152,7 +152,7 @@ func ReturnTrieLayerVariable(elements [][32]byte, length uint64) ([][32]byte, []
 func RecomputeFromLayer(changedLeaves [][32]byte, changedIdx []uint64, nodes [][32]byte, offsets []int) ([32]byte, error) {
 	// Write changed leaves into level 0.
 	for i, idx := range changedIdx {
-		nodes[offsets[0]+int(idx)] = changedLeaves[i]
+		nodes[offsets[0]+int(idx)] = changedLeaves[i] // lint:ignore uintcast -- idx is bounded by trie level size.
 	}
 
 	depth := len(offsets) - 2
@@ -217,7 +217,7 @@ func recomputeBranch(idx int, nodes [][32]byte, offsets []int, depth int, hasher
 	currentIndex := idx
 	var combinedChunks [64]byte
 
-	for level := 0; level < depth; level++ {
+	for level := range depth {
 		isLeft := currentIndex%2 == 0
 		neighborIdx := currentIndex ^ 1
 		levelSize := offsets[level+1] - offsets[level]
