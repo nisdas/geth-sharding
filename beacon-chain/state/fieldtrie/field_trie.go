@@ -428,7 +428,13 @@ func (f *FieldTrie) recomputeOverlay(dirtyLeaves map[uint64][32]byte) ([32]byte,
 // calling recomputeOverlay for the core walk-up.
 func (f *FieldTrie) recomputeOverlayDispatch(indices []uint64, fieldRoots [][32]byte) ([32]byte, error) {
 	// Check promotion threshold before adding to overrides.
-	if len(indices) > OverlayPromotionThreshold || f.overlaySize() > OverlayPromotionThreshold {
+	// Use leaf-level overlay count (overrides[0]) rather than overlaySize()
+	// which sums across all trie levels. Each dirty leaf propagates entries
+	// to ~depth levels during recomputeOverlay, so overlaySize() grows at
+	// ~2× the leaf rate. For deep tries (validators: depth=40), this causes
+	// premature rebuilds when only a small fraction of leaves changed.
+	leafOverrides := len(f.overrides[0])
+	if len(indices) > OverlayPromotionThreshold || leafOverrides > OverlayPromotionThreshold {
 		return f.rebuildTrie(indices, fieldRoots)
 	}
 

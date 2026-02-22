@@ -1,6 +1,8 @@
 package fieldtrie_test
 
 import (
+	"encoding/binary"
+	"math"
 	"testing"
 
 	. "github.com/OffchainLabs/prysm/v7/beacon-chain/state/fieldtrie"
@@ -446,11 +448,197 @@ func TestOverlayAllIndicesDirty(t *testing.T) {
 	assert.Equal(t, expectedRoot, overlayRoot, "overlay with all indices dirty should produce correct root")
 }
 
+// TestOverlayNoSpuriousRebuild verifies that overlays are not prematurely
+// rebuilt when only a small fraction of leaves change across multiple rounds.
+//
+// The overlay promotion threshold (OverlayPromotionThreshold=10K) should be
+// checked against the leaf-level overlay count (overrides[0]), NOT the total
+// overlay size across all trie levels. Each dirty leaf propagates entries up
+// through the entire trie depth during recomputeOverlay, so the total overlay
+// size grows at ~2x the leaf rate. For deep tries (validators: depth=40),
+// this caused premature rebuilds when the total crossed 10K even though only
+// a few thousand leaves had actually changed.
+func TestOverlayNoSpuriousRebuild(t *testing.T) {
+	t.Run("CompositeArray_Validators", testOverlayNoSpuriousRebuild_Validators)
+	t.Run("BasicArray_BlockRoots", testOverlayNoSpuriousRebuild_BlockRoots)
+	t.Run("CompressedArray_Balances", testOverlayNoSpuriousRebuild_Balances)
+}
+
+func testOverlayNoSpuriousRebuild_Validators(t *testing.T) {
+	// Validators use CompositeArray with depth=40 (ValidatorRegistryLimit=2^40).
+	// This is the most affected case: each dirty leaf creates entries at ~20
+	// intermediate levels, so overlaySize() grows at ~2x the leaf rate.
+	const numVals = 5000
+
+	vals := make([]stateutil.CompactValidator, numVals)
+	for i := range vals {
+		var pk [48]byte
+		binary.BigEndian.PutUint64(pk[:], uint64(i))
+		var wc [32]byte
+		wc[0] = 0x01
+		binary.BigEndian.PutUint64(wc[12:], uint64(i))
+		vals[i] = stateutil.CompactValidator{
+			PublicKey:                  pk,
+			WithdrawalCredentials:      wc,
+			EffectiveBalance:           32000000000,
+			ActivationEligibilityEpoch: 0,
+			ActivationEpoch:            0,
+			ExitEpoch:                  primitives.Epoch(math.MaxUint64),
+			WithdrawableEpoch:          primitives.Epoch(math.MaxUint64),
+		}
+	}
+
+	mvSlice := buildTestCompositeSlice(vals)
+	elements := mvslice.MultiValueSliceComposite[stateutil.CompactValidator]{
+		Identifiable:    mockIdentifier{},
+		MultiValueSlice: mvSlice,
+	}
+	owned, err := NewFieldTrie(types.Validators, types.CompositeArray, elements, params.BeaconConfig().ValidatorRegistryLimit)
+	require.NoError(t, err)
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	// 15 rounds x 500 dirty = up to 5000 unique dirty leaves (all of them).
+	// Total overlay entries across all 40 levels is approximately 10K+, but
+	// the leaf-level count is 5000. The old overlaySize() check would have
+	// triggered rebuild; the leaf-only check does not.
+	const rounds = 15
+	const dirtyPerRound = 500
+
+	var lastRoot [32]byte
+	for round := range rounds {
+		start := (round * dirtyPerRound) % numVals
+		dirtyIdx := make([]uint64, dirtyPerRound)
+		for i := range dirtyPerRound {
+			idx := (start + i) % numVals
+			dirtyIdx[i] = uint64(idx)
+			vals[idx].EffectiveBalance = uint64(32000000000 + round*1000 + i)
+		}
+		root, err := overlay.RecomputeTrie(dirtyIdx, vals)
+		require.NoError(t, err)
+		require.NotEqual(t, [32]byte{}, root)
+		lastRoot = root
+	}
+
+	// Overlay must NOT have been rebuilt.
+	require.Equal(t, true, overlay.IsOverlay(),
+		"overlay should not have been rebuilt — leaf overlay count is under threshold")
+
+	// Verify correctness against from-scratch computation.
+	expectedRoot, err := stateutil.ValidatorRegistryRoot(vals)
+	require.NoError(t, err)
+	assert.Equal(t, expectedRoot, lastRoot,
+		"overlay root should match from-scratch computation after many small updates")
+}
+
+func testOverlayNoSpuriousRebuild_BlockRoots(t *testing.T) {
+	// BlockRoots use BasicArray with depth=13 (SlotsPerHistoricalRoot=8192).
+	// Shallower than validators, but the overlay amplification (~2x leaf rate)
+	// still causes overlaySize() to exceed 10K before leaf count does.
+	const numRoots = 8192
+
+	roots := make(customtypes.BlockRoots, numRoots)
+	for i := range roots {
+		binary.BigEndian.PutUint64(roots[i][:], uint64(i))
+	}
+
+	owned, err := NewFieldTrie(types.BlockRoots, types.BasicArray, roots, uint64(params.BeaconConfig().SlotsPerHistoricalRoot))
+	require.NoError(t, err)
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	// 15 rounds x 600 dirty = up to 8192 unique dirty leaves.
+	// Total overlay across 13 levels is approximately 2x the leaf count. When
+	// the leaf count reaches ~5500, overlaySize() exceeds 10K but the leaf
+	// count is still below the threshold.
+	const rounds = 15
+	const dirtyPerRound = 600
+
+	var lastRoot [32]byte
+	for round := range rounds {
+		start := (round * dirtyPerRound) % numRoots
+		dirtyIdx := make([]uint64, dirtyPerRound)
+		for i := range dirtyPerRound {
+			idx := (start + i) % numRoots
+			dirtyIdx[i] = uint64(idx)
+			binary.BigEndian.PutUint64(roots[idx][:], uint64(round*numRoots+idx))
+		}
+		root, err := overlay.RecomputeTrie(dirtyIdx, roots)
+		require.NoError(t, err)
+		require.NotEqual(t, [32]byte{}, root)
+		lastRoot = root
+	}
+
+	require.Equal(t, true, overlay.IsOverlay(),
+		"overlay should not have been rebuilt — leaf overlay count is under threshold")
+
+	// Verify correctness: convert to [][]byte for reference root.
+	rootsSlice := make([][]byte, numRoots)
+	for i, r := range roots {
+		cp := r
+		rootsSlice[i] = cp[:]
+	}
+	expectedRoot, err := stateutil.RootsArrayHashTreeRoot(rootsSlice, uint64(params.BeaconConfig().SlotsPerHistoricalRoot))
+	require.NoError(t, err)
+	assert.Equal(t, expectedRoot, lastRoot,
+		"overlay root should match from-scratch computation after many small updates")
+}
+
+func testOverlayNoSpuriousRebuild_Balances(t *testing.T) {
+	// Balances use CompressedArray with depth=38 (ValidatorLimitForBalancesChunks).
+	// 4 uint64 balances pack into one 32-byte chunk, so 40000 balances = 10000
+	// chunks. With 10000 unique chunks dirty, overlaySize() significantly
+	// exceeds 10K across all levels (~20K total), but the leaf overlay count
+	// stays at 10000 (not > threshold since check is strict >).
+	const numBals = 40000
+
+	bals := make([]uint64, numBals)
+	for i := range bals {
+		bals[i] = 32000000000
+	}
+
+	owned, err := NewFieldTrie(types.Balances, types.CompressedArray, bals, stateutil.ValidatorLimitForBalancesChunks())
+	require.NoError(t, err)
+	overlay := owned.CopyTrie()
+	require.Equal(t, true, overlay.IsOverlay())
+
+	// 20 rounds x 2000 dirty balances = 40000 balance indices = 10000 unique
+	// chunks. Total overlay across 38 levels is approximately 2x the chunk
+	// count (~20K), well above the 10K threshold.
+	const rounds = 20
+	const dirtyPerRound = 2000
+
+	var lastRoot [32]byte
+	for round := range rounds {
+		start := (round * dirtyPerRound) % numBals
+		dirtyIdx := make([]uint64, dirtyPerRound)
+		for i := range dirtyPerRound {
+			idx := (start + i) % numBals
+			dirtyIdx[i] = uint64(idx)
+			bals[idx] = uint64(32000000000 + round*1000 + i)
+		}
+		root, err := overlay.RecomputeTrie(dirtyIdx, bals)
+		require.NoError(t, err)
+		require.NotEqual(t, [32]byte{}, root)
+		lastRoot = root
+	}
+
+	require.Equal(t, true, overlay.IsOverlay(),
+		"overlay should not have been rebuilt — leaf overlay count is under threshold")
+
+	// Verify correctness.
+	expectedRoot, err := stateutil.Uint64ListRootWithRegistryLimit(bals)
+	require.NoError(t, err)
+	assert.Equal(t, expectedRoot, lastRoot,
+		"overlay root should match from-scratch computation after many small updates")
+}
+
 func buildTestCompositeSlice[V comparable](values []V) mvslice.MultiValueSliceComposite[V] {
 	obj := &mvslice.Slice[V]{}
-	obj.Init(values)
+	mock := mockIdentifier{}
+	obj.Init(values, mock.Id())
 	return mvslice.MultiValueSliceComposite[V]{
-		Identifiable:    nil,
+		Identifiable:    mock,
 		MultiValueSlice: obj,
 	}
 }
