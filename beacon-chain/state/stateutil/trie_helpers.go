@@ -254,8 +254,18 @@ func GrowFlatBuffer(nodes [][32]byte, offsets []int, minLeafCount int) ([][32]by
 
 	for level := 0; level <= depth; level++ {
 		oldSize := offsets[level+1] - offsets[level]
+		newSize := newOffsets[level+1] - newOffsets[level]
 		if oldSize > 0 {
 			copy(newNodes[newOffsets[level]:], nodes[offsets[level]:offsets[level]+oldSize])
+		}
+		// Initialize new entries with ZeroHashes[level]. An uncomputed node
+		// at level L represents an empty subtree whose root is ZeroHashes[L],
+		// not the zero value ([32]byte{}). Level 0 is skipped because
+		// ZeroHashes[0] == [32]byte{} (already zero-filled by make).
+		if level > 0 {
+			for i := oldSize; i < newSize; i++ {
+				newNodes[newOffsets[level]+i] = trie.ZeroHashes[level]
+			}
 		}
 	}
 	return newNodes, newOffsets

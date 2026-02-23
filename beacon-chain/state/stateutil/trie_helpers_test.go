@@ -194,6 +194,44 @@ func TestRecomputeFromLayer_VariableSizedArray(t *testing.T) {
 	assert.Equal(t, expectedRoot, root)
 }
 
+func TestGrowFlatBuffer_ZeroHashInitialization(t *testing.T) {
+	// Build a trie with 4 leaves, then grow to 8 and recompute only leaf 4.
+	// This tests that new upper-level entries are initialized to ZeroHashes[level],
+	// not [32]byte{}. Without correct initialization, the neighbor at level 1
+	// index 3 would be read as [32]byte{} instead of ZeroHashes[1], producing
+	// an incorrect root.
+	depth := 3
+	leaves := [][32]byte{
+		{1}, {2}, {3}, {4},
+	}
+	offsets := stateutil.ComputeOffsetsVariable(depth, len(leaves))
+	nodes := make([][32]byte, offsets[depth+1])
+	copy(nodes, leaves)
+	stateutil.HashUpFromLeaves(nodes, offsets)
+
+	// Compute the expected root by building a full 8-leaf trie from scratch
+	// with the 5th leaf set and leaves 5-7 as zero.
+	expectedLeaves := make([][32]byte, 8)
+	copy(expectedLeaves, leaves)
+	expectedLeaves[4] = [32]byte{5}
+	expectedOffsets := stateutil.ComputeOffsetsVariable(depth, 8)
+	expectedNodes := make([][32]byte, expectedOffsets[depth+1])
+	copy(expectedNodes, expectedLeaves)
+	stateutil.HashUpFromLeaves(expectedNodes, expectedOffsets)
+	expectedRoot := expectedNodes[expectedOffsets[depth]]
+
+	// Grow the original trie from 4 to 8 leaves in one step, then
+	// recompute only the branch for leaf 4.
+	nodes, offsets = stateutil.GrowFlatBuffer(nodes, offsets, 8)
+	changedLeaves := [][32]byte{{5}}
+	changedIdx := []uint64{4}
+	root, _, _, err := stateutil.RecomputeFromLayerVariable(changedLeaves, changedIdx, nodes, offsets)
+	require.NoError(t, err)
+
+	assert.Equal(t, expectedRoot, root,
+		"Root mismatch: GrowFlatBuffer must initialize new upper-level entries to ZeroHashes[level]")
+}
+
 func TestMerkleizeTrieLeaves_BadHashLayer(t *testing.T) {
 	hashLayer := make([][32]byte, 12)
 	layers := make([][][32]byte, 20)
